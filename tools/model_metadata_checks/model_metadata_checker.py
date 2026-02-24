@@ -20,13 +20,7 @@ RULES_DICT = df.to_dict(orient="index")
 def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """
     Extracts classes and associations from the model whose names are in the provided list.
-
-    Args:
-        model (dict): The loaded model JSON as a dictionary.
-        names (list of str): list of class or association names to extract.
-
-    Returns:
-        dict: A dictionary with 'classes' and 'associations' keys containing the matching elements.
+    Supports both UML XMI JSON and JSON-LD (ttl) formats.
     """
     result = {
         "classes": [],
@@ -46,17 +40,14 @@ def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dic
                  connector.get("target_name") in names)
             ):
                 result["associations"].append(connector)
-                
     # JSON-LD (ttl key)
     elif "ttl" in model:
         for item in model["ttl"]:
             item_type = item.get("@type", [])
-            # Only classes
             if "http://www.w3.org/2002/07/owl#Class" in item_type:
                 label = _get_ld_label(item)
                 if label and label in names:
                     result["classes"].append(item)
-            # Associations: not explicit in JSON-LD, but could be ObjectProperty/DatatypeProperty
             if ("http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
                 "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type):
                 label = _get_ld_label(item)
@@ -67,100 +58,172 @@ def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dic
 
     return result
 
-def metadata_checks(model: dict) -> dict:
-    """
-    Check if all classes, attributes and associations have the required metadata:
-    - URI
-    - definition-en
-    - label-en
-    - usage_note_en
 
-    Returns a dictionary of problematic concepts with their missing metadata.
-    """
+# ---------------------------------------------------------------------------
+# Helpers to read tag values from XMI elements / connectors
+# ---------------------------------------------------------------------------
 
+def _xmi_tag(tags: list[dict], tag_name: str) -> str | None:
+    """Return the value of the first tag matching tag_name, or None."""
+    for t in tags:
+        if t.get("name") == tag_name:
+            return t.get("value") or None
+    return None
+
+
+def _xmi_concept_subgraph(concept: dict, concept_type: str) -> str:
+    """
+    Build a compact human-readable description of an XMI class or connector
+    to use as the 'sub-graph' sent to the LLM for R4/R5/R7 checks.
+    Mirrors the Turtle sub-graph used in the TTL branch.
+    """
+    lines = [f"# {concept_type}: {concept.get('name', '(unnamed)')}"]
+    tags = concept.get("tags", [])
+
+    uri     = _xmi_tag(tags, "uri")
+    label   = _xmi_tag(tags, "label-en")
+    defn    = _xmi_tag(tags, "definition-en")
+    usage   = _xmi_tag(tags, "usageNote-en")
+
+    if uri:
+        lines.append(f"  uri: {uri}")
+    if label:
+        lines.append(f"  label (en): {label}")
+    if defn:
+        lines.append(f"  definition (en): {defn}")
+    if usage:
+        lines.append(f"  usage note (en): {usage}")
+
+    # Include attributes for classes
+    for attr in concept.get("attributes", []):
+        attr_tags = attr.get("tags_attribute", [])
+        a_uri   = _xmi_tag(attr_tags, "uri")
+        a_label = _xmi_tag(attr_tags, "label-en")
+        a_def   = _xmi_tag(attr_tags, "definition-en")
+        a_usage = _xmi_tag(attr_tags, "usageNote-en")
+        lines.append(f"  # attribute: {attr.get('name', '(unnamed)')} [{attr.get('type', '')}]")
+        if a_uri:
+            lines.append(f"    uri: {a_uri}")
+        if a_label:
+            lines.append(f"    label (en): {a_label}")
+        if a_def:
+            lines.append(f"    definition (en): {a_def}")
+        if a_usage:
+            lines.append(f"    usage note (en): {a_usage}")
+
+    # Include target-end tags for connectors
+    for t in concept.get("tags_target", []):
+        lines.append(f"  target tag [{t.get('name')}]: {t.get('value')}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# GC-R3: metadata completeness
+# ---------------------------------------------------------------------------
+
+def metadata_checks(model: dict) -> dict[str, list[str]]:
+    """
+    Check if all classes, attributes, and associations have the required metadata:
+    URI, definition-en, label-en, usage_note_en.
+
+    Returns a dict mapping concept identifiers to a list of missing metadata items.
+    Supports both UML XMI JSON and JSON-LD (ttl) formats.
+    """
+    problematic_concepts: dict[str, list[str]] = {}
+
+    def _flag(concept_id: str, issue: str):
+        problematic_concepts.setdefault(concept_id, []).append(issue)
+
+    # ------------------------------------------------------------------
+    # UML XMI JSON
+    # ------------------------------------------------------------------
     if "elements" in model and "connectors" in model:
-        # UML XMI JSON
-        missing_URI = []
-        missing_def = []
-        missing_label = []
-        missing_usage_note = []
-
         for element in model["elements"]:
-            if element["type"] == 'uml:Class':
-                if "uri" not in str(element["tags"]):
-                    missing_URI.append(f'Class: {element["name"]}')
-                if "definition-en" not in str(element["tags"]):
-                    missing_def.append(f'Class: {element["name"]}')
-                if "label-en" not in str(element["tags"]):
-                    missing_label.append(f'Class: {element["name"]}')
-                if "usage_note_en" not in str(element["tags"]):
-                    missing_usage_note.append(f'Class: {element["name"]}')
+            if element.get("type") != "uml:Class":
+                continue
 
-                for attribute in element.get("attributes", []):
-                    if "uri" not in str(attribute.get("tags_attribute", {})):
-                        missing_URI.append(f'Attribute: {element["name"]}/{attribute["name"]}')
-                    if "definition-en" not in str(attribute.get("tags_attribute", {})):
-                        missing_def.append(f'Attribute: {element["name"]}/{attribute["name"]}')
-                    if "label-en" not in str(attribute.get("tags_attribute", {})):
-                        missing_label.append(f'Attribute: {element["name"]}/{attribute["name"]}')
-                    if "usage_note_en" not in str(attribute.get("tags_attribute", {})):
-                        missing_usage_note.append(f'Attribute: {element["name"]}/{attribute["name"]}')
+            name = element.get("name", "(unnamed class)")
+            tags = element.get("tags", [])
+            tag_names = {t.get("name") for t in tags}
+
+            if "uri" not in tag_names:
+                _flag(f"Class: {name}", "missing URI")
+            if "definition-en" not in tag_names:
+                _flag(f"Class: {name}", "missing definition")
+            if "label-en" not in tag_names:
+                _flag(f"Class: {name}", "missing label")
+            if "usageNote-en" not in tag_names:
+                _flag(f"Class: {name}", "missing usage note")
+
+            for attribute in element.get("attributes", []):
+                attr_name = attribute.get("name", "(unnamed attribute)")
+                concept_id = f"Attribute: {name}/{attr_name}"
+                attr_tag_names = {t.get("name") for t in attribute.get("tags_attribute", [])}
+
+                if "uri" not in attr_tag_names:
+                    _flag(concept_id, "missing URI")
+                if "definition-en" not in attr_tag_names:
+                    _flag(concept_id, "missing definition")
+                if "label-en" not in attr_tag_names:
+                    _flag(concept_id, "missing label")
+                if "usageNote-en" not in attr_tag_names:
+                    _flag(concept_id, "missing usage note")
 
         for connector in model["connectors"]:
-            if connector["relationship"] == 'Association':
-                if "uri" not in str(connector.get("tags_target", {})):
-                    missing_URI.append(f'Association: {connector["source_name"]}/{connector["rt"]}')
-                if "definition-en" not in str(connector.get("tags_target", {})):
-                    missing_def.append(f'Association: {connector["source_name"]}/{connector["rt"]}')
-                if "label-en" not in str(connector.get("tags_target", {})):
-                    missing_label.append(f'Association: {connector["source_name"]}/{connector["rt"]}')
-                if "usage_note_en" not in str(connector.get("tags_target", {})):
-                    missing_usage_note.append(f'Association: {connector["source_name"]}/{connector["rt"]}')
+            if connector.get("relationship") != "Association":
+                continue
 
-        return {
-            "missing_URI": missing_URI,
-            "missing_definition": missing_def,
-            "missing_label": missing_label,
-            "missing_usage_note": missing_usage_note,
-        }
+            rt = connector.get("rt") or connector.get("source_name", "(unnamed)")
+            concept_id = f"Association: {connector.get('source_name', '')}/{rt}"
+            tgt_tag_names = {t.get("name") for t in connector.get("tags_target", [])}
 
+            if "uri" not in tgt_tag_names:
+                _flag(concept_id, "missing URI")
+            if "definition-en" not in tgt_tag_names:
+                _flag(concept_id, "missing definition")
+            if "label-en" not in tgt_tag_names:
+                _flag(concept_id, "missing label")
+            if "usageNote-en" not in tgt_tag_names:
+                _flag(concept_id, "missing usage note")
+
+    # ------------------------------------------------------------------
+    # JSON-LD (ttl key)
+    # ------------------------------------------------------------------
     elif "ttl" in model:
-        # JSON-LD (ttl key)
-        problematic_concepts = {}
-
         for item in model["ttl"]:
-            item_id = item.get("@id", "")
+            item_id   = item.get("@id", "")
             item_type = item.get("@type", [])
 
-            if (
-                "http://www.w3.org/2002/07/owl#Class" in item_type or
+            is_class = "http://www.w3.org/2002/07/owl#Class" in item_type
+            is_prop  = (
                 "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
                 "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
-            ):
-                if not item_id:
-                    problematic_concepts["[no id]"] = ["missing URI"]
-                    continue
+            )
+            if not (is_class or is_prop):
+                continue
 
-                issues = []
+            if not item_id:
+                _flag("[no id]", "missing URI")
 
-                if not _get_ld_label(item):
-                    issues.append("missing label")
-                if not _get_ld_comment(item):
-                    issues.append("missing definition")
-                if not _get_ld_usage_note(item):
-                    issues.append("missing usage note")
-
-                if issues:
-                    problematic_concepts[item_id] = issues
-
-        return problematic_concepts
+            if not _get_ld_label(item):
+                _flag(item_id, "missing label")
+            if not _get_ld_comment(item):
+                _flag(item_id, "missing definition")
+            if not _get_ld_usage_note(item):
+                _flag(item_id, "missing usage note")
 
     else:
         raise ValueError("Unknown model format: expected UML XMI or JSON-LD with 'ttl' key")
 
-# --- JSON-LD helpers ---
+    return problematic_concepts
+
+
+# ---------------------------------------------------------------------------
+# JSON-LD helpers
+# ---------------------------------------------------------------------------
+
 def _get_ld_label(item):
-    # rdfs:label
     labels = item.get("http://www.w3.org/2000/01/rdf-schema#label", [])
     for label in labels:
         if label.get("@language") == "en":
@@ -170,7 +233,6 @@ def _get_ld_label(item):
     return None
 
 def _get_ld_comment(item):
-    # rdfs:comment
     comments = item.get("http://www.w3.org/2000/01/rdf-schema#comment", [])
     for comment in comments:
         if comment.get("@language") == "en":
@@ -180,7 +242,6 @@ def _get_ld_comment(item):
     return None
 
 def _get_ld_usage_note(item):
-    # skos:scopeNote
     notes = item.get("http://www.w3.org/2004/02/skos/core#scopeNote", [])
     for note in notes:
         if note.get("@language") == "en":
@@ -190,34 +251,38 @@ def _get_ld_usage_note(item):
     return None
 
 
+# ---------------------------------------------------------------------------
+# LLM helper
+# ---------------------------------------------------------------------------
+
 async def generate_explanations(rule_description: str, uri: str, sub_graph: str, ctx: Context):
     prompt = {
-                "instruction": (
-                    "You are a semantic interoperability and ontology expert. "
-                    "Your task is to analyze a specific concepts from a user's data model and check whether it violates a specific set of design rules, using the provided context. "
-                    "Inputs:\n"
-                    "- SEMIC rule description: A plain-language summarry of the SEMIC style guide rule that need to be checked.\n"
-                    "- concept: The concept URI that need to be analysed against the rules.\n"
-                    "- sub-graph: The RDF triples (in Turtle format) directly relevant to the concept involved.\n"
-                    "\n"
-                    "Instructions:\n"
-                    "1. Clearly identify the potential error and the SEMIC rule it relates to.\n"
-                    "2. Explain, in the context of the user's data model (using the sub-graph), what this error means and which concepts are affected.\n"
-                    "3. list the concerned concepts (URIs or labels) that are directly involved in the error.\n"
-                    "4. Provide a brief, actionable recommendation for how the user can resolve or overcome this error, referencing the SEMIC rule and the sub-graph.\n"
-                    "\n"
-                    "Output format:\n"
-                    "{\n"
-                    "  'error': <the error message>,\n"
-                    "  'explanation': <what this error means in the context of the user's data model>,\n"
-                    "  'concerned_concept': URI or label,\n"
-                    "  'resolution': <brief recommendation to fix the error>\n"
-                    "}"
-                ),
-                "SEMIC rule description": rule_description,
-                "concept": uri,
-                "sub-graph": sub_graph,
-            }
+        "instruction": (
+            "You are a semantic interoperability and ontology expert. "
+            "Your task is to analyze a specific concept from a user's data model and check whether it violates a specific set of design rules, using the provided context. "
+            "Inputs:\n"
+            "- SEMIC rule description: A plain-language summary of the SEMIC style guide rule that needs to be checked.\n"
+            "- concept: The concept URI (or label) that needs to be analysed against the rules.\n"
+            "- sub-graph: The metadata directly relevant to the concept involved.\n"
+            "\n"
+            "Instructions:\n"
+            "1. Clearly identify the potential error and the SEMIC rule it relates to.\n"
+            "2. Explain, in the context of the user's data model (using the sub-graph), what this error means and which concepts are affected.\n"
+            "3. List the concerned concepts (URIs or labels) that are directly involved in the error.\n"
+            "4. Provide a brief, actionable recommendation for how the user can resolve or overcome this error, referencing the SEMIC rule and the sub-graph.\n"
+            "\n"
+            "Output format:\n"
+            "{\n"
+            "  'error': <the error message>,\n"
+            "  'explanation': <what this error means in the context of the user's data model>,\n"
+            "  'concerned_concept': URI or label,\n"
+            "  'resolution': <brief recommendation to fix the error>\n"
+            "}"
+        ),
+        "SEMIC rule description": rule_description,
+        "concept": uri,
+        "sub-graph": sub_graph,
+    }
     response = await ctx.sample(
         messages=[json.dumps(prompt, ensure_ascii=False, indent=2)],
         system_prompt="You are a semantic interoperability and ontology expert.",
@@ -225,74 +290,122 @@ async def generate_explanations(rule_description: str, uri: str, sub_graph: str,
         max_tokens=600,
     )
     m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
-
     return m, response
 
+
+# ---------------------------------------------------------------------------
+# GC-R4 / R5 / R7: terminology & definition consistency (LLM-assisted)
+# ---------------------------------------------------------------------------
+
 async def R4_5_7_checks(model: dict[str, Any], ctx: Context):
-    
+
     non_observance_of_GC_R4 = {
-            "error": "Non-observance of SEMIC rule GC-R4: The terminology style shall be consistent across the vocabulary.",
-            "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R4"]["Description"],
-            "concerned_concepts": {},
-            "resolution": "See details per concept"
-        }
+        "error": "Non-observance of SEMIC rule GC-R4: The terminology style shall be consistent across the vocabulary.",
+        "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R4"]["Description"],
+        "concerned_concepts": {},
+        "resolution": "See details per concept",
+    }
     non_observance_of_GC_R5 = {
-            "error": "Non-observance of SEMIC rule GC-R5: The concept definitions shall be elaborated consistently across the vocabulary.",
-            "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R5"]["Description"],
-            "concerned_concepts": {},
-            "resolution": "See details per concept"
-        }
+        "error": "Non-observance of SEMIC rule GC-R5: The concept definitions shall be elaborated consistently across the vocabulary.",
+        "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R5"]["Description"],
+        "concerned_concepts": {},
+        "resolution": "See details per concept",
+    }
     non_observance_of_GC_R7 = {
-            "error": "Non-observance of SEMIC rule GC-R7: Indicators of deontic modalities for classes and properties do not have semantic or normative value. Still they may be used as editorial annotations.",
-            "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R7"]["Description"],
-            "concerned_concepts": {},
-            "resolution": "See details per concept"
-        }
+        "error": "Non-observance of SEMIC rule GC-R7: Indicators of deontic modalities for classes and properties do not have semantic or normative value. Still they may be used as editorial annotations.",
+        "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R7"]["Description"],
+        "concerned_concepts": {},
+        "resolution": "See details per concept",
+    }
 
-    if "ttl" in model:        
-        # JSON-LD (ttl key)
+    async def _check_concept(concept_id: str, sub_graph: str):
+        """Run all three LLM rule checks for a single concept and store results."""
+        for rule_key, bucket in (
+            ("Non-observance of SEMIC rule GC-R4", non_observance_of_GC_R4),
+            ("Non-observance of SEMIC rule GC-R5", non_observance_of_GC_R5),
+            ("Non-observance of SEMIC rule GC-R7", non_observance_of_GC_R7),
+        ):
+            m, response = await generate_explanations(
+                RULES_DICT[rule_key]["Description"], concept_id, sub_graph, ctx
+            )
+            try:
+                bucket["concerned_concepts"][concept_id] = json.loads(
+                    m.group(0) if m else response.text
+                )
+            except Exception:
+                bucket["concerned_concepts"][concept_id] = {
+                    "llm_output": getattr(response, "text", str(response))
+                }
+
+    # ------------------------------------------------------------------
+    # UML XMI JSON
+    # ------------------------------------------------------------------
+    if "elements" in model and "connectors" in model:
+        # Collect all concepts: classes (+ their attributes inline) and associations.
+        concepts: list[tuple[str, str]] = []   # (concept_id, sub_graph_text)
+
+        for element in model.get("elements", []):
+            if element.get("type") != "uml:Class":
+                continue
+            tags   = element.get("tags", [])
+            uri    = _xmi_tag(tags, "uri") or element.get("name", "(unnamed)")
+            sub_graph = _xmi_concept_subgraph(element, "Class")
+            concepts.append((uri, sub_graph))
+
+        for connector in model.get("connectors", []):
+            if connector.get("relationship") != "Association":
+                continue
+            tgt_tags = connector.get("tags_target", [])
+            uri = (
+                _xmi_tag(tgt_tags, "uri")
+                or connector.get("rt")
+                or f"{connector.get('source_name', '')} -> {connector.get('target_name', '')}"
+            )
+            sub_graph = _xmi_concept_subgraph(connector, "Association")
+            concepts.append((uri, sub_graph))
+
+        for i, (concept_id, sub_graph) in enumerate(concepts):
+            await ctx.report_progress(progress=i, total=len(concepts))
+            # Throttle: close/reopen SSE stream every 30 items to avoid timeouts.
+            if i % 30 == 0 and i > 0:
+                await ctx.close_sse_stream()
+            await _check_concept(concept_id, sub_graph)
+
+    # ------------------------------------------------------------------
+    # JSON-LD (ttl key)
+    # ------------------------------------------------------------------
+    elif "ttl" in model:
         for i, item in enumerate(model["ttl"]):
-            
             await ctx.report_progress(progress=i, total=len(model["ttl"]))
-
             if i % 30 == 0 and i > 0:
                 await ctx.close_sse_stream()
 
-            item_id = item.get("@id", "")
+            item_id   = item.get("@id", "")
             item_type = item.get("@type", [])
-            # --- OWL Ontology ---
-            if ("http://www.w3.org/2002/07/owl#Class" in item_type or 
+
+            if not (
+                "http://www.w3.org/2002/07/owl#Class" in item_type or
                 "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
                 "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
             ):
-                sub_graph = extract_subgraph_for_uris(model["ttl_raw"], [URIRef(item_id)])
-                if sub_graph == "\n":
-                    sub_graph = model["ttl_raw"]
+                continue
 
-                m, response = await generate_explanations(RULES_DICT["Non-observance of SEMIC rule GC-R4"]["Description"], item_id, sub_graph, ctx)
-                try:
-                    non_observance_of_GC_R4["concerned_concepts"][item_id] = json.loads(m.group(0) if m else response.text)
-                except Exception:
-                    non_observance_of_GC_R4["concerned_concepts"][item_id] = {"llm_output": getattr(response, "text", str(response))}
+            sub_graph = extract_subgraph_for_uris(model["ttl_raw"], [URIRef(item_id)])
+            if sub_graph == "\n":
+                sub_graph = model["ttl_raw"]
 
-                m, response = await generate_explanations(RULES_DICT["Non-observance of SEMIC rule GC-R5"]["Description"], item_id, sub_graph, ctx)
-                try:
-                    non_observance_of_GC_R5["concerned_concepts"][item_id] = json.loads(m.group(0) if m else response.text)
-                except Exception:
-                    non_observance_of_GC_R5["concerned_concepts"][item_id] = {"llm_output": getattr(response, "text", str(response))}
+            await _check_concept(item_id, sub_graph)
 
-                m, response = await generate_explanations(RULES_DICT["Non-observance of SEMIC rule GC-R7"]["Description"], item_id, sub_graph, ctx)
-                try:
-                    non_observance_of_GC_R7["concerned_concepts"][item_id] = json.loads(m.group(0) if m else response.text)
-                except Exception:
-                    non_observance_of_GC_R7["concerned_concepts"][item_id] = {"llm_output": getattr(response, "text", str(response))}
-                    
-        return non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7
-                
     else:
-        # Unknown format
-        return {"Unknown model format: expected UML XMI or JSON-LD with 'ttl' key"}, {"Unknown model format: expected UML XMI or JSON-LD with 'ttl' key"}, {"Unknown model format: expected UML XMI or JSON-LD with 'ttl' key"}
+        msg = {"error": "Unknown model format: expected UML XMI JSON or OWL ontology in Turtle"}
+        return msg, msg, msg
 
+    return non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 async def metadata_checker(
     user: str = "",
@@ -301,7 +414,45 @@ async def metadata_checker(
     check_instruction: str = None,
     ctx: Context = None,
 ) -> dict:
-    """Validate metadata completeness and terminology consistency in a semantic model based on general conventions of the SEMIC style guide."""
+    """
+    Validate metadata completeness and terminology consistency in a semantic model
+    based on general conventions of the SEMIC style guide.
+
+    This tool checks a model (loaded via `get_model(user, name)`) for:
+      • GC‑R3 — Metadata completeness (URI, definition, label, usage note)
+      • GC‑R4 — Consistent terminology style
+      • GC‑R5 — Consistent definition elaboration
+      • GC‑R7 — Avoid deontic modality indicators as semantic/normative values
+
+    It supports two modes:
+
+    1) Full model check (default — when `target_names` is None):
+       - For UML XMI JSON models (keys "elements" & "connectors"), it inspects classes,
+         attributes, and associations by scanning their tag containers for:
+         "uri", "definition-en", "label-en", and "usageNote-en".
+       - For JSON‑LD models (key "ttl"), it inspects OWL Classes and Properties by reading:
+         rdfs:label (en), rdfs:comment (en), skos:scopeNote (en), and @id (URI).
+       - Returns a structured report for GC‑R3, GC‑R4, GC‑R5, GC‑R7.
+
+    2) Targeted check (when `target_names` is provided):
+       - Extracts only the specified classes/associations from the model.
+       - Sends the extracted subset to an LLM with a custom instruction.
+       - Requires `ctx`. Returns the LLM's JSON output (or raw text under "llm_output").
+
+    Supported model formats:
+      - UML XMI JSON: expects top-level keys "elements" and "connectors".
+      - JSON‑LD:      expects top-level key "ttl" and "ttl_raw" (for R4/R5/R7 checks).
+
+    Args:
+        user (str):              Identifier passed to `get_model`. Defaults to "".
+        name (str):              Model name passed to `get_model`. Defaults to "".
+        target_names (list[str] | None): When provided, runs a targeted check.
+        check_instruction (str | None):  Custom LLM instruction for targeted mode.
+        ctx (Context | None):    fastmcp Context. Required for R4/R5/R7 and targeted checks.
+
+    Returns:
+        dict: Structured report with GC-R3/R4/R5/R7 sections, or LLM output for targeted checks.
+    """
     model = get_model(user, name)
 
     if not target_names:
@@ -309,48 +460,42 @@ async def metadata_checker(
             "error": "Non-observance of SEMIC rule GC-R3: All classes, attributes and associations should have a URI, a definition, a label, and ideally a usage note.",
             "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R3"]["Description"],
             "concerned_concepts": metadata_checks(model),
-            "resolution": "Ensure to add a URI, definition, label, and usage note to all classes, attributes, and associations in the model."
+            "resolution": "Ensure all classes, attributes, and associations have a URI, definition, label, and usage note.",
         }
-        non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7 = await R4_5_7_checks(model, ctx)
-        
-        
+        non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7 = (
+            await R4_5_7_checks(model, ctx)
+        )
+
         return {
-            "Non-observance of SEMIC rule GC-R3: All classes, attributes and associations should have a URI, a definition, a label, and ideally a usage note.": non_observance_of_GC_R3,
-            "Non-observance of SEMIC rule GC-R4: The terminology style shall be consistent across the vocabulary.": non_observance_of_GC_R4,
-            "Non-observance of SEMIC rule GC-R5: The concept definitions shall be elaborated consistently across the vocabulary.": non_observance_of_GC_R5,
-            "Non-observance of SEMIC rule GC-R7: Indicators of deontic modalities for classes and properties do not have semantic or normative value. Still they may be used as editorial annotations.": non_observance_of_GC_R7,
+            "Non-observance of SEMIC rule GC-R3": non_observance_of_GC_R3,
+            "Non-observance of SEMIC rule GC-R4": non_observance_of_GC_R4,
+            "Non-observance of SEMIC rule GC-R5": non_observance_of_GC_R5,
+            "Non-observance of SEMIC rule GC-R7": non_observance_of_GC_R7,
         }
-    
+
     else:
-        # Extract subset
         subset = extract_classes_associations(model, target_names)
-        # Prepare prompt for LLM
         if not check_instruction:
             check_instruction = (
                 "Check the following classes and associations for metadata completeness. "
-                "Report any missing or incomplete metadata fields (URI, definition-en, label-en, usage_note_en)."
+                "Report any missing or incomplete metadata fields (URI, definition-en, label-en, usageNote-en)."
             )
-        prompt = {
-            "instruction": check_instruction,
-            "data": subset
-        }
+        prompt = {"instruction": check_instruction, "data": subset}
+
         if ctx is None:
             raise ValueError("ctx (LLM context) must be provided for targeted checks.")
-        # Call LLM
-        import json, re
+
         response = await ctx.sample(
             messages=[json.dumps(prompt, ensure_ascii=False, indent=2)],
             system_prompt="You are a metadata quality checker for semantic models.",
             temperature=0.0,
             max_tokens=800,
         )
-        # Try to parse JSON from LLM output
         m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
         try:
-            result = json.loads(m.group(0) if m else response.text)
+            return json.loads(m.group(0) if m else response.text)
         except Exception:
-            result = {"llm_output": getattr(response, "text", str(response))}
-        return result
+            return {"llm_output": getattr(response, "text", str(response))}
 
 
 metadata_checker.__doc__ = f"""
