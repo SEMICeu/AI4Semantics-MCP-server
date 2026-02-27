@@ -1,10 +1,9 @@
-# server.py
 from __future__ import annotations
 import json, re
 from typing import Any
 from fastmcp import Context, Client
 from resources.semantic_model.utils import get_model
-from prompts import system_prompt_orchestrator
+from .prompts import system_prompt_orchestrator
 
 # -------- Planner tool that can CALL planning tools via an inner loop ----------
 async def plan_workflow_with_tools(

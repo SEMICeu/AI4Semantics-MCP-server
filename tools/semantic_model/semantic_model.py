@@ -18,9 +18,7 @@ from json import (
     dump,
     load,
 )
-from resources.semantic_model import (
-    MODELS_PATH,
-)
+from resources.semantic_model.utils import MODELS_PATH
 from rdflib import Graph, Namespace, RDFS, OWL, RDF, SKOS, URIRef, Literal, XSD
 import uuid
 from json import load, dump

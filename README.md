@@ -177,5 +177,5 @@ Use `retrieve_documents(query)` to quickly test the index and verify the top res
 
 ### 6. Start the server
 ```bash
-python -m ai4semantics_mcp_server.server
+python -m server
 ```

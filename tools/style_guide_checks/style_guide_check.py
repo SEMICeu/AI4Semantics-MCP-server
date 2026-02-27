@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from fastmcp import Context
-from conventions import metadata_conventions, reuse_conventions
+from .conventions import metadata_conventions, reuse_conventions
 
 
 async def style_guide_check(
@@ -95,7 +95,6 @@ async def style_guide_check(
 
 style_guide_check.__doc__ = f"""
     This tool produces a markdown report with a fixed structure, summarizing the results of an assessment of data model against the SEMIC style guide convention.
-   C:\Users\Dean Terneu\Documents\PwC\Projects\SEMIC\AI\PwC_Repos\ai4semantics_mcp_server\tools\style_guide_checks
     Args:
         ctx (Context, optional):
             The LLM context for prompt completion.
