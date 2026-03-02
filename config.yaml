@@ -4,3 +4,7 @@ file_paths:
 
 dir_paths:
   models: "resources/semantic_model/models"
+
+Phoenix:
+  local: "http://localhost:6006/v1/traces"
+  hosted: "TBC"

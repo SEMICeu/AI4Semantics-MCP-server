@@ -8,3 +8,13 @@ services:
       - ./data/qdrant:/qdrant/storage
     environment:
       - QDRANT__TELEMETRY_DISABLED=true
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+    volumes:
+      - phoenix_data:/data
+
+volumes:
+  phoenix_data:

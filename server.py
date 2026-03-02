@@ -1,14 +1,33 @@
 from dotenv import load_dotenv
 load_dotenv()
 
- 
+# ---- Phoenix FIRST, before all other imports ----
+from phoenix.otel import register
+from openinference.instrumentation.mcp import MCPInstrumentor
+from openinference.instrumentation.openai import OpenAIInstrumentor
+from config import load_config
+
+config = load_config()
+PHOENIX_URL = config["Phoenix"]["local"]
+
+tracer_provider = register(
+    project_name="default",
+    endpoint=PHOENIX_URL,
+    auto_instrument=True,
+)
+MCPInstrumentor().instrument(tracer_provider=tracer_provider)
+OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+
+from opentelemetry import trace
+tracer = trace.get_tracer(__name__)
+with tracer.start_as_current_span("server-startup-test") as span:
+    span.set_attribute("server.status", "started")
+
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 from fastmcp.server.event_store import EventStore
 import resources
 import tools
-
-
 
 # CHANGE FOR DEPLOYMENT/DEVELOPMENT!
 mcp = FastMCP(
