@@ -455,16 +455,41 @@ async def metadata_checker(
     """
     model = get_model(user, name)
 
-    if not target_names:
-        non_observance_of_GC_R3 = {
-            "error": "Non-observance of SEMIC rule GC-R3: All classes, attributes and associations should have a URI, a definition, a label, and ideally a usage note.",
-            "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R3"]["Description"],
-            "concerned_concepts": metadata_checks(model),
-            "resolution": "Ensure all classes, attributes, and associations have a URI, definition, label, and usage note.",
+    # If there is no stored model for this (user, name) pair, return a clear,
+    # user-facing error instead of falling through to "unknown format".
+    if not model:
+        return {
+            "error": "No model found for this user/session.",
+            "hint": (
+                "Upload a model first using the `upload_model` tool with the same "
+                "`user` and `name` values, then call `metadata_checker` again."
+            ),
         }
-        non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7 = (
-            await R4_5_7_checks(model, ctx)
-        )
+
+    if not target_names:
+        try:
+            non_observance_of_GC_R3 = {
+                "error": "Non-observance of SEMIC rule GC-R3: All classes, attributes and associations should have a URI, a definition, a label, and ideally a usage note.",
+                "explanation": RULES_DICT["Non-observance of SEMIC rule GC-R3"]["Description"],
+                "concerned_concepts": metadata_checks(model),
+                "resolution": "Ensure all classes, attributes, and associations have a URI, definition, label, and usage note.",
+            }
+            non_observance_of_GC_R4, non_observance_of_GC_R5, non_observance_of_GC_R7 = (
+                await R4_5_7_checks(model, ctx)
+            )
+        except ValueError as e:
+            # Surface an explicit, friendly error when the stored JSON shape
+            # does not match any supported model format.
+            return {
+                "error": "Model format on server is not compatible with this tool.",
+                "hint": (
+                    "Ensure the stored model is either UML XMI JSON (top-level 'elements' "
+                    "and 'connectors') or JSON-LD/Turtle (top-level 'ttl' and 'ttl_raw'). "
+                    "If you recently uploaded a model, re-upload it using the latest "
+                    "`upload_model` and then retry."
+                ),
+                "details": str(e),
+            }
 
         return {
             "Non-observance of SEMIC rule GC-R3": non_observance_of_GC_R3,

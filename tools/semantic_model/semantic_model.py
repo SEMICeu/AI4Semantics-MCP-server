@@ -411,13 +411,53 @@ def _find_file(
 
 
 def upload_model(
-    model: dict[str, Any],
+    model: dict[str, Any] | None = None,
     user: str = "",
     name: str = "",
 ) -> dict[str, Any]:
     """
     Save a model in JSON format.
+
+    Normalises common input shapes so downstream tools (e.g. `metadata_checker`,
+    `style_guide_validator`, `reuse_check`) see a consistent structure:
+
+    - UML XMI JSON      → expects top-level ``elements`` and ``connectors``.
+    - JSON-LD / TTL     → expects top-level ``ttl`` (and optionally ``ttl_raw``).
+
+    If the client uploads a wrapped structure like::
+
+        {"xmi": {"elements": [...], "connectors": [...]} }
+
+    this function will flatten it so that:
+
+        model["elements"], model["connectors"]
+
+    are populated at the top level as well.
     """
+
+    # Guard against clients that forget to send the `model` payload at all.
+    if model is None:
+        return {
+            "error": "Missing required 'model' argument.",
+            "hint": (
+                "Call `upload_model` with a JSON object under the 'model' argument "
+                "containing either UML XMI JSON (top-level 'elements' and 'connectors') "
+                "or JSON-LD/Turtle (top-level 'ttl' and optionally 'ttl_raw')."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Shape normalisation for uploaded models
+    # ------------------------------------------------------------------
+    # If the client sends an XMI-like structure under the "xmi" key,
+    # expose its elements/connectors at the top level so tools that
+    # only look for "elements"/"connectors" still work.
+    if isinstance(model, dict) and "xmi" in model and isinstance(model["xmi"], dict):
+        xmi = model["xmi"]
+        if "elements" in xmi and "connectors" in xmi:
+            model.setdefault("elements", xmi["elements"])
+            model.setdefault("connectors", xmi["connectors"])
+
     folder_path = MODELS_PATH/user
     if not exists(folder_path):
         mkdir(folder_path)
