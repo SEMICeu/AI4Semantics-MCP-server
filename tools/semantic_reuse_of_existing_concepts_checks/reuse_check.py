@@ -40,58 +40,7 @@ async def reuse_check(
     )
 
     # Detect model type
-    if "elements" in model and "connectors" in model:
-        # UML XMI JSON
-        if target_names:
-            class_names = set(target_names)
-        else:
-            class_names = {element.get("name") for element in model.get("elements", []) if element.get("type") == "uml:Class"}
-
-        for i, element in enumerate(model.get("elements", [])):
-            
-            await ctx.report_progress(progress=i, total=len(model.get("elements", [])))
-
-            if i % 30 == 0 and i > 0:
-                await ctx.close_sse_stream()
-
-            if element.get("type") == "uml:Class" and element.get("name") in class_names:
-                class_name = element.get("name")
-                # Collect class and its attributes
-                class_with_properties = dict(element)
-                class_with_properties["attributes"] = element.get("attributes", [])
-                docs = await retrieve_documents(class_name, vocabularies or [], n_documents)
-                prompt = {
-                    "instruction": (
-                        "You are a semantic interoperability expert. "
-                        "Given the user's class definition (including its attributes/properties) and the retrieved standard class documentation, "
-                        "analyze the reuse of standards for this class according to the following criteria: "
-                        f"{reuse_guidance} "
-                        "Return a JSON dictionary with the following keys: "
-                        "'relevant_standard': the most relevant standard class to reuse (if any in the candidate, else null or empty), "
-                        "'general_comment': a short comment on whether there is proper reuse and, if not, why based on the list of criteria, "
-                        "'recommendations': concrete recommendations for improving reuse or interoperability. "
-                        "If no relevant standards are found, set 'relevant_standard' to null, and provide suggestions in 'recommendations'."
-                    ),
-                    "user_class": class_with_properties,
-                    "candidate_standards": docs
-                }
-                response = await ctx.sample(
-                    messages=[json.dumps(prompt, ensure_ascii=False, indent=2)],
-                    system_prompt="You are a semantic interoperability expert.",
-                    temperature=0.0,
-                    max_tokens=800,
-                )
-                import json, re
-                m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
-                try:
-                    results[class_name] = json.loads(m.group(0) if m else response.text)
-                except Exception:
-                    results[class_name] = {"llm_output": getattr(response, "text", str(response))}
-                print("[DEBUG] Processed class:")
-                print(results[class_name])
-            
-
-    elif "ttl" in model:
+    if "ttl" in model:
         # JSON-LD
         # Collect all OWL classes and SHACL NodeShapes and their properties
         class_map = {}
@@ -173,7 +122,55 @@ async def reuse_check(
                 results[label] = {"llm_output": getattr(response, "text", str(response))}
             print("[DEBUG] Processed class:")
             print(results[label])
+    elif "elements" in model and "connectors" in model:
+        # UML XMI JSON
+        if target_names:
+            class_names = set(target_names)
+        else:
+            class_names = {element.get("name") for element in model.get("elements", []) if element.get("type") == "uml:Class"}
 
+        for i, element in enumerate(model.get("elements", [])):
+            
+            await ctx.report_progress(progress=i, total=len(model.get("elements", [])))
+
+            if i % 30 == 0 and i > 0:
+                await ctx.close_sse_stream()
+
+            if element.get("type") == "uml:Class" and element.get("name") in class_names:
+                class_name = element.get("name")
+                # Collect class and its attributes
+                class_with_properties = dict(element)
+                class_with_properties["attributes"] = element.get("attributes", [])
+                docs = await retrieve_documents(class_name, vocabularies or [], n_documents)
+                prompt = {
+                    "instruction": (
+                        "You are a semantic interoperability expert. "
+                        "Given the user's class definition (including its attributes/properties) and the retrieved standard class documentation, "
+                        "analyze the reuse of standards for this class according to the following criteria: "
+                        f"{reuse_guidance} "
+                        "Return a JSON dictionary with the following keys: "
+                        "'relevant_standard': the most relevant standard class to reuse (if any in the candidate, else null or empty), "
+                        "'general_comment': a short comment on whether there is proper reuse and, if not, why based on the list of criteria, "
+                        "'recommendations': concrete recommendations for improving reuse or interoperability. "
+                        "If no relevant standards are found, set 'relevant_standard' to null, and provide suggestions in 'recommendations'."
+                    ),
+                    "user_class": class_with_properties,
+                    "candidate_standards": docs
+                }
+                response = await ctx.sample(
+                    messages=[json.dumps(prompt, ensure_ascii=False, indent=2)],
+                    system_prompt="You are a semantic interoperability expert.",
+                    temperature=0.0,
+                    max_tokens=800,
+                )
+                import json, re
+                m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
+                try:
+                    results[class_name] = json.loads(m.group(0) if m else response.text)
+                except Exception:
+                    results[class_name] = {"llm_output": getattr(response, "text", str(response))}
+                print("[DEBUG] Processed class:")
+                print(results[class_name])
     else:
         raise ValueError("Unknown model format: expected UML XMI or JSON-LD with 'ttl' key")
 
