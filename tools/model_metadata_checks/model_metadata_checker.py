@@ -27,21 +27,8 @@ def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dic
         "associations": []
     }
 
-    # UML XMI JSON
-    if "elements" in model and "connectors" in model:
-        for element in model.get("elements", []):
-            if element.get("type") == "uml:Class" and element.get("name") in names:
-                result["classes"].append(element)
-        for connector in model.get("connectors", []):
-            if (
-                connector.get("relationship") == "Association" and
-                (connector.get("name") in names or
-                 connector.get("source_name") in names or
-                 connector.get("target_name") in names)
-            ):
-                result["associations"].append(connector)
     # JSON-LD (ttl key)
-    elif "ttl" in model:
+    if "ttl" in model:
         for item in model["ttl"]:
             item_type = item.get("@type", [])
             if "http://www.w3.org/2002/07/owl#Class" in item_type:
@@ -53,6 +40,19 @@ def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dic
                 label = _get_ld_label(item)
                 if label and label in names:
                     result["associations"].append(item)
+    # UML XMI JSON
+    elif "elements" in model and "connectors" in model:
+        for element in model.get("elements", []):
+            if element.get("type") == "uml:Class" and element.get("name") in names:
+                result["classes"].append(element)
+        for connector in model.get("connectors", []):
+            if (
+                connector.get("relationship") == "Association" and
+                (connector.get("name") in names or
+                 connector.get("source_name") in names or
+                 connector.get("target_name") in names)
+            ):
+                result["associations"].append(connector)
     else:
         raise ValueError("Unknown model format: expected UML XMI or JSON-LD with 'ttl' key")
 
@@ -136,9 +136,34 @@ def metadata_checks(model: dict) -> dict[str, list[str]]:
         problematic_concepts.setdefault(concept_id, []).append(issue)
 
     # ------------------------------------------------------------------
+    # JSON-LD (ttl key)
+    # ------------------------------------------------------------------
+    if "ttl" in model:
+        for item in model["ttl"]:
+            item_id   = item.get("@id", "")
+            item_type = item.get("@type", [])
+
+            is_class = "http://www.w3.org/2002/07/owl#Class" in item_type
+            is_prop  = (
+                "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
+                "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
+            )
+            if not (is_class or is_prop):
+                continue
+
+            if not item_id:
+                _flag("[no id]", "missing URI")
+
+            if not _get_ld_label(item):
+                _flag(item_id, "missing label")
+            if not _get_ld_comment(item):
+                _flag(item_id, "missing definition")
+            if not _get_ld_usage_note(item):
+                _flag(item_id, "missing usage note")
+    # ------------------------------------------------------------------
     # UML XMI JSON
     # ------------------------------------------------------------------
-    if "elements" in model and "connectors" in model:
+    elif "elements" in model and "connectors" in model:
         for element in model["elements"]:
             if element.get("type") != "uml:Class":
                 continue
@@ -186,33 +211,6 @@ def metadata_checks(model: dict) -> dict[str, list[str]]:
                 _flag(concept_id, "missing label")
             if "usageNote-en" not in tgt_tag_names:
                 _flag(concept_id, "missing usage note")
-
-    # ------------------------------------------------------------------
-    # JSON-LD (ttl key)
-    # ------------------------------------------------------------------
-    elif "ttl" in model:
-        for item in model["ttl"]:
-            item_id   = item.get("@id", "")
-            item_type = item.get("@type", [])
-
-            is_class = "http://www.w3.org/2002/07/owl#Class" in item_type
-            is_prop  = (
-                "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
-                "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
-            )
-            if not (is_class or is_prop):
-                continue
-
-            if not item_id:
-                _flag("[no id]", "missing URI")
-
-            if not _get_ld_label(item):
-                _flag(item_id, "missing label")
-            if not _get_ld_comment(item):
-                _flag(item_id, "missing definition")
-            if not _get_ld_usage_note(item):
-                _flag(item_id, "missing usage note")
-
     else:
         raise ValueError("Unknown model format: expected UML XMI or JSON-LD with 'ttl' key")
 
@@ -338,9 +336,33 @@ async def R4_5_7_checks(model: dict[str, Any], ctx: Context):
                 }
 
     # ------------------------------------------------------------------
+    # JSON-LD (ttl key)
+    # ------------------------------------------------------------------
+    if "ttl" in model:
+        for i, item in enumerate(model["ttl"]):
+            await ctx.report_progress(progress=i, total=len(model["ttl"]))
+            if i % 30 == 0 and i > 0:
+                await ctx.close_sse_stream()
+
+            item_id   = item.get("@id", "")
+            item_type = item.get("@type", [])
+
+            if not (
+                "http://www.w3.org/2002/07/owl#Class" in item_type or
+                "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
+                "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
+            ):
+                continue
+
+            sub_graph = extract_subgraph_for_uris(model["ttl_raw"], [URIRef(item_id)])
+            if sub_graph == "\n":
+                sub_graph = model["ttl_raw"]
+
+            await _check_concept(item_id, sub_graph)
+    # ------------------------------------------------------------------
     # UML XMI JSON
     # ------------------------------------------------------------------
-    if "elements" in model and "connectors" in model:
+    elif "elements" in model and "connectors" in model:
         # Collect all concepts: classes (+ their attributes inline) and associations.
         concepts: list[tuple[str, str]] = []   # (concept_id, sub_graph_text)
 
@@ -370,32 +392,6 @@ async def R4_5_7_checks(model: dict[str, Any], ctx: Context):
             if i % 30 == 0 and i > 0:
                 await ctx.close_sse_stream()
             await _check_concept(concept_id, sub_graph)
-
-    # ------------------------------------------------------------------
-    # JSON-LD (ttl key)
-    # ------------------------------------------------------------------
-    elif "ttl" in model:
-        for i, item in enumerate(model["ttl"]):
-            await ctx.report_progress(progress=i, total=len(model["ttl"]))
-            if i % 30 == 0 and i > 0:
-                await ctx.close_sse_stream()
-
-            item_id   = item.get("@id", "")
-            item_type = item.get("@type", [])
-
-            if not (
-                "http://www.w3.org/2002/07/owl#Class" in item_type or
-                "http://www.w3.org/2002/07/owl#ObjectProperty" in item_type or
-                "http://www.w3.org/2002/07/owl#DatatypeProperty" in item_type
-            ):
-                continue
-
-            sub_graph = extract_subgraph_for_uris(model["ttl_raw"], [URIRef(item_id)])
-            if sub_graph == "\n":
-                sub_graph = model["ttl_raw"]
-
-            await _check_concept(item_id, sub_graph)
-
     else:
         msg = {"error": "Unknown model format: expected UML XMI JSON or OWL ontology in Turtle"}
         return msg, msg, msg
